@@ -323,15 +323,44 @@ void int2048::divide_abs(const int2048 &left, const int2048 &right, int2048 &quo
     }
     quotient.normalize(); remainder = int2048(rem); return;
   }
-  // Long division is quadratic.  Use two stored limbs at once here: 10^8 is
-  // still safe for every intermediate product in a signed long long, while
-  // reducing the number of inner-loop iterations by almost a factor of four.
-  const long long division_base = 100000000LL;
-  std::vector<long long> u, v;
-  for (int i = 0; i < static_cast<int>(left.digit.size()); i += 2)
-    u.push_back(left.digit[i] + (i + 1 < static_cast<int>(left.digit.size()) ? static_cast<long long>(base) * left.digit[i + 1] : 0));
-  for (int i = 0; i < static_cast<int>(right.digit.size()); i += 2)
-    v.push_back(right.digit[i] + (i + 1 < static_cast<int>(right.digit.size()) ? static_cast<long long>(base) * right.digit[i + 1] : 0));
+  // Long division is quadratic.  A 10^9 workspace keeps all products below
+  // 2^63 and significantly reduces the number of quotient-digit iterations.
+  const long long division_base = 1000000000LL;
+  auto append_decimal = [](std::string &text, long long value, int width) {
+    char buffer[10];
+    for (int i = width - 1; i >= 0; --i) { buffer[i] = static_cast<char>('0' + value % 10); value /= 10; }
+    for (int i = 0; i < width; ++i) text += buffer[i];
+  };
+  auto to_division_base = [&](const int2048 &value) {
+    std::string text;
+    text.reserve(value.digit.size() * 4);
+    int top = static_cast<int>(value.digit.size()) - 1;
+    int width = 1;
+    while (value.digit[top] >= width * 10) width *= 10;
+    append_decimal(text, value.digit[top], width == 1 && value.digit[top] == 0 ? 1 : (width == 1 ? 1 : (width == 10 ? 2 : (width == 100 ? 3 : 4))));
+    for (int i = top - 1; i >= 0; --i) append_decimal(text, value.digit[i], 4);
+    std::vector<long long> converted;
+    for (int end = static_cast<int>(text.size()); end > 0; end -= 9) {
+      int begin = end - 9 < 0 ? 0 : end - 9;
+      long long part = 0;
+      for (int i = begin; i < end; ++i) part = part * 10 + text[i] - '0';
+      converted.push_back(part);
+    }
+    return converted;
+  };
+  auto from_division_base = [&](const std::vector<long long> &values, int2048 &value) {
+    int top = static_cast<int>(values.size()) - 1;
+    while (top > 0 && values[top] == 0) --top;
+    std::string text;
+    text.reserve((top + 1) * 9);
+    long long leading = values[top];
+    int width = 1;
+    while (leading >= width * 10) width *= 10;
+    append_decimal(text, leading, width == 1 ? 1 : (width == 10 ? 2 : (width == 100 ? 3 : (width == 1000 ? 4 : (width == 10000 ? 5 : (width == 100000 ? 6 : (width == 1000000 ? 7 : (width == 10000000 ? 8 : 9))))))));
+    for (int i = top - 1; i >= 0; --i) append_decimal(text, values[i], 9);
+    value.read(text); value.negative = false;
+  };
+  std::vector<long long> u = to_division_base(left), v = to_division_base(right);
   const long long norm = division_base / (v.back() + 1);
   long long carry = 0;
   for (int i = 0; i < static_cast<int>(u.size()); ++i) {
@@ -376,22 +405,15 @@ void int2048::divide_abs(const int2048 &left, const int2048 &right, int2048 &quo
     } else u[j + n] = value;
     q[j] = estimate;
   }
-  quotient.digit.clear();
-  for (int i = 0; i < static_cast<int>(q.size()); ++i) {
-    quotient.digit.push_back(static_cast<int>(q[i] % base));
-    quotient.digit.push_back(static_cast<int>(q[i] / base));
-  }
-  quotient.negative = false; quotient.normalize();
-  remainder.digit.assign(n * 2, 0);
+  from_division_base(q, quotient);
+  std::vector<long long> r(n, 0);
   long long rem = 0;
   for (int i = n - 1; i >= 0; --i) {
     long long value = rem * division_base + u[i];
-    long long denormalized = value / norm;
+    r[i] = value / norm;
     rem = value % norm;
-    remainder.digit[2 * i] = static_cast<int>(denormalized % base);
-    remainder.digit[2 * i + 1] = static_cast<int>(denormalized / base);
   }
-  remainder.negative = false; remainder.normalize();
+  from_division_base(r, remainder);
 }
 
 void int2048::divide_floor(const int2048 &left, const int2048 &right, int2048 &quotient, int2048 &remainder) {
