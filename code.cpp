@@ -323,51 +323,75 @@ void int2048::divide_abs(const int2048 &left, const int2048 &right, int2048 &quo
     }
     quotient.normalize(); remainder = int2048(rem); return;
   }
-  const int norm = base / (right.digit.back() + 1);
-  int2048 u(left), v(right);
-  u.negative = v.negative = false;
-  u.multiply_uint(norm); v.multiply_uint(norm);
-  u.digit.push_back(0);
-  const int n = static_cast<int>(v.digit.size());
-  const int m = static_cast<int>(u.digit.size()) - n - 1;
-  quotient.digit.assign(m + 1, 0); quotient.negative = false;
+  // Long division is quadratic.  Use two stored limbs at once here: 10^8 is
+  // still safe for every intermediate product in a signed long long, while
+  // reducing the number of inner-loop iterations by almost a factor of four.
+  const long long division_base = 100000000LL;
+  std::vector<long long> u, v;
+  for (int i = 0; i < static_cast<int>(left.digit.size()); i += 2)
+    u.push_back(left.digit[i] + (i + 1 < static_cast<int>(left.digit.size()) ? static_cast<long long>(base) * left.digit[i + 1] : 0));
+  for (int i = 0; i < static_cast<int>(right.digit.size()); i += 2)
+    v.push_back(right.digit[i] + (i + 1 < static_cast<int>(right.digit.size()) ? static_cast<long long>(base) * right.digit[i + 1] : 0));
+  const long long norm = division_base / (v.back() + 1);
+  long long carry = 0;
+  for (int i = 0; i < static_cast<int>(u.size()); ++i) {
+    long long value = u[i] * norm + carry;
+    u[i] = value % division_base; carry = value / division_base;
+  }
+  if (carry) u.push_back(carry);
+  carry = 0;
+  for (int i = 0; i < static_cast<int>(v.size()); ++i) {
+    long long value = v[i] * norm + carry;
+    v[i] = value % division_base; carry = value / division_base;
+  }
+  if (carry) v.push_back(carry);
+  u.push_back(0);
+  const int n = static_cast<int>(v.size());
+  const int m = static_cast<int>(u.size()) - n - 1;
+  std::vector<long long> q(m + 1, 0);
   for (int j = m; j >= 0; --j) {
-    long long top = static_cast<long long>(u.digit[j + n]) * base + u.digit[j + n - 1];
-    long long estimate = top / v.digit[n - 1];
-    long long rem = top % v.digit[n - 1];
-    if (estimate >= base) { estimate = base - 1; rem += v.digit[n - 1]; }
-    while (estimate * v.digit[n - 2] > static_cast<long long>(base) * rem + u.digit[j + n - 2]) { --estimate; rem += v.digit[n - 1]; if (rem >= base) break; }
-    long long carry = 0, borrow = 0;
+    long long top = u[j + n] * division_base + u[j + n - 1];
+    long long estimate = top / v[n - 1];
+    long long rem = top % v[n - 1];
+    if (estimate >= division_base) { estimate = division_base - 1; rem += v[n - 1]; }
+    while (estimate * v[n - 2] > division_base * rem + u[j + n - 2]) { --estimate; rem += v[n - 1]; if (rem >= division_base) break; }
+    long long product_carry = 0, borrow = 0;
     for (int i = 0; i < n; ++i) {
-      long long product = estimate * v.digit[i] + carry;
-      carry = product / base;
-      long long value = u.digit[j + i] - (product % base) - borrow;
-      if (value < 0) { value += base; borrow = 1; } else borrow = 0;
-      u.digit[j + i] = static_cast<int>(value);
+      long long product = estimate * v[i] + product_carry;
+      product_carry = product / division_base;
+      long long value = u[j + i] - (product % division_base) - borrow;
+      if (value < 0) { value += division_base; borrow = 1; } else borrow = 0;
+      u[j + i] = value;
     }
-    long long value = u.digit[j + n] - carry - borrow;
+    long long value = u[j + n] - product_carry - borrow;
     if (value < 0) {
       --estimate;
       long long add_carry = 0;
       for (int i = 0; i < n; ++i) {
-        long long sum = u.digit[j + i] + v.digit[i] + add_carry;
-        if (sum >= base) { sum -= base; add_carry = 1; } else add_carry = 0;
-        u.digit[j + i] = static_cast<int>(sum);
+        long long sum = u[j + i] + v[i] + add_carry;
+        if (sum >= division_base) { sum -= division_base; add_carry = 1; } else add_carry = 0;
+        u[j + i] = sum;
       }
-      u.digit[j + n] = static_cast<int>(u.digit[j + n] + add_carry);
-    } else u.digit[j + n] = static_cast<int>(value);
-    quotient.digit[j] = static_cast<int>(estimate);
+      u[j + n] += add_carry;
+    } else u[j + n] = value;
+    q[j] = estimate;
   }
-  quotient.normalize();
-  remainder.digit.assign(u.digit.begin(), u.digit.begin() + n);
-  remainder.negative = false;
+  quotient.digit.clear();
+  for (int i = 0; i < static_cast<int>(q.size()); ++i) {
+    quotient.digit.push_back(static_cast<int>(q[i] % base));
+    quotient.digit.push_back(static_cast<int>(q[i] / base));
+  }
+  quotient.negative = false; quotient.normalize();
+  remainder.digit.assign(n * 2, 0);
   long long rem = 0;
   for (int i = n - 1; i >= 0; --i) {
-    long long value = rem * base + remainder.digit[i];
-    remainder.digit[i] = static_cast<int>(value / norm);
+    long long value = rem * division_base + u[i];
+    long long denormalized = value / norm;
     rem = value % norm;
+    remainder.digit[2 * i] = static_cast<int>(denormalized % base);
+    remainder.digit[2 * i + 1] = static_cast<int>(denormalized / base);
   }
-  remainder.normalize();
+  remainder.negative = false; remainder.normalize();
 }
 
 void int2048::divide_floor(const int2048 &left, const int2048 &right, int2048 &quotient, int2048 &remainder) {
